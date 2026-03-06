@@ -174,7 +174,21 @@ if ( ! file_exists( TA_PLUGIN_DIR . 'vendor/autoload.php' ) ) {
 require_once TA_PLUGIN_DIR . 'includes/autoload.php';
 
 // Load Composer autoloader for third-party libraries.
-require_once TA_PLUGIN_DIR . 'vendor/autoload.php';
+try {
+	require_once TA_PLUGIN_DIR . 'vendor/autoload.php';
+} catch ( \Exception $e ) {
+	add_action(
+		'admin_notices',
+		function() use ( $e ) {
+			printf(
+				'<div class="notice notice-error"><p><strong>%s</strong> %s</p></div>',
+				esc_html__( 'Third Audience - Dependency Error:', 'third-audience' ),
+				esc_html( $e->getMessage() )
+			);
+		}
+	);
+	return;
+}
 
 /**
  * Run database migrations.
