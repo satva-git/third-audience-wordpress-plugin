@@ -270,7 +270,14 @@ class TA_Cache_Admin {
 	 * @return void
 	 */
 	public function ajax_regenerate_all_markdown() {
-		$this->security->verify_ajax_request( 'cache_browser' );
+		// Accept nonce from settings page (admin_ajax) or cache browser page (cache_browser).
+		$nonce = isset( $_REQUEST['nonce'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['nonce'] ) ) : '';
+		if ( ! $this->security->verify_nonce( $nonce, 'admin_ajax' ) && ! $this->security->verify_nonce( $nonce, 'cache_browser' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Security check failed.', 'third-audience' ) ), 403 );
+		}
+		if ( ! $this->security->current_user_can_manage() ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'third-audience' ) ), 403 );
+		}
 
 		$cleared = $this->cache_manager->clear_pregenerated_markdown();
 
