@@ -281,10 +281,15 @@ class TA_Database_Auto_Fixer {
 
 		// Columns required by the current application code that may be missing
 		// from tables created by older plugin versions.
+		// IMPORTANT: Prerequisite columns (request_method, response_size) must appear
+		// before columns that use AFTER <prerequisite> clauses, otherwise the ALTER
+		// TABLE fails with "Unknown column" on upgrades from older schema versions.
 		$required_columns = array(
 			'content_type'      => "ALTER TABLE {$table} ADD COLUMN content_type varchar(20) DEFAULT 'html' AFTER traffic_type",
 			'client_user_agent' => "ALTER TABLE {$table} ADD COLUMN client_user_agent text DEFAULT NULL AFTER user_agent",
+			'request_method'    => "ALTER TABLE {$table} ADD COLUMN request_method varchar(20) NOT NULL DEFAULT 'md_url' AFTER content_type",
 			'request_type'      => "ALTER TABLE {$table} ADD COLUMN request_type varchar(20) DEFAULT 'unknown' AFTER request_method",
+			'response_size'     => "ALTER TABLE {$table} ADD COLUMN response_size int(11) DEFAULT NULL AFTER response_time",
 			'http_status'       => "ALTER TABLE {$table} ADD COLUMN http_status int(3) DEFAULT NULL AFTER response_size",
 		);
 
@@ -478,7 +483,11 @@ class TA_Database_Auto_Fixer {
 
 		$sql .= "-- 6. Add LLM Traffic tracking columns (v3.5.0)\n";
 		$sql .= "ALTER TABLE {$table} ADD COLUMN client_user_agent text DEFAULT NULL AFTER user_agent;\n";
+		$sql .= "-- Add prerequisite columns before dependent ones\n";
+		$sql .= "ALTER TABLE {$table} ADD COLUMN request_method varchar(20) NOT NULL DEFAULT 'md_url' AFTER content_type;\n";
 		$sql .= "ALTER TABLE {$table} ADD COLUMN request_type varchar(20) DEFAULT 'unknown' AFTER request_method;\n";
+		$sql .= "ALTER TABLE {$table} ADD COLUMN response_size int(11) DEFAULT NULL AFTER response_time;\n";
+		$sql .= "ALTER TABLE {$table} ADD COLUMN http_status int(3) DEFAULT NULL AFTER response_size;\n";
 
 		return $sql;
 	}

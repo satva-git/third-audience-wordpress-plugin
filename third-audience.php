@@ -230,7 +230,12 @@ function ta_get_required_columns() {
 	return array(
 		'content_type'      => "ALTER TABLE {$table_name} ADD COLUMN content_type VARCHAR(50) DEFAULT 'html' AFTER traffic_type",
 		'client_user_agent' => "ALTER TABLE {$table_name} ADD COLUMN client_user_agent text DEFAULT NULL AFTER user_agent",
+		// Prerequisite columns must be added before columns that reference them in AFTER clauses.
+		// Without these, upgrades from older versions fail because request_method/response_size
+		// don't exist yet when request_type/http_status try to position AFTER them.
+		'request_method'    => "ALTER TABLE {$table_name} ADD COLUMN request_method varchar(20) NOT NULL DEFAULT 'md_url' AFTER content_type",
 		'request_type'      => "ALTER TABLE {$table_name} ADD COLUMN request_type varchar(20) DEFAULT 'unknown' AFTER request_method",
+		'response_size'     => "ALTER TABLE {$table_name} ADD COLUMN response_size int(11) DEFAULT NULL AFTER response_time",
 		'http_status'       => "ALTER TABLE {$table_name} ADD COLUMN http_status int(3) DEFAULT NULL AFTER response_size",
 	);
 }
