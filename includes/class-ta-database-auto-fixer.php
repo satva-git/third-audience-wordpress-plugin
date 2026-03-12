@@ -46,6 +46,7 @@ class TA_Database_Auto_Fixer {
 	public function fix_all_issues() {
 		$results = array(
 			'tables_created'  => $this->create_missing_tables(),
+			'legacy_migrated' => $this->migrate_legacy_schema(),
 			'columns_added'   => $this->add_missing_columns(),
 			'types_fixed'     => $this->fix_column_types(),
 			'indexes_added'   => $this->add_missing_indexes(),
@@ -56,6 +57,116 @@ class TA_Database_Auto_Fixer {
 		}
 
 		return $results;
+	}
+
+
+	/**
+	 * Migrate legacy schema columns to current schema.
+	 *
+	 * Handles renaming old columns (page_url, visited_at, cache_hit) to their
+	 * new names (url, visit_timestamp, cache_status) and adds columns that are
+	 * completely new in the current schema version.
+	 *
+	 * @since 3.5.4
+	 * @return array List of migrations performed.
+	 */
+	private function migrate_legacy_schema() {
+		global $wpdb;
+
+		$table    = $wpdb->prefix . 'ta_bot_analytics';
+		$migrated = array();
+
+		// Check if table exists.
+		$table_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+		if ( $table_exists !== $table ) {
+			return $migrated;
+		}
+
+		$columns = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" );
+
+		// --- Column renames (old name -> new name) ---
+
+		// page_url -> url
+		if ( in_array( 'page_url', $columns, true ) && ! in_array( 'url', $columns, true ) ) {
+			$result = $wpdb->query( "ALTER TABLE {$table} CHANGE COLUMN page_url url varchar(500) NOT NULL" );
+			if ( false !== $result ) {
+				$migrated[] = 'page_url -> url';
+			}
+		}
+
+		// page_title -> post_title (only if post_title doesn't exist yet)
+		if ( in_array( 'page_title', $columns, true ) && ! in_array( 'post_title', $columns, true ) ) {
+			$result = $wpdb->query( "ALTER TABLE {$table} CHANGE COLUMN page_title post_title text DEFAULT NULL" );
+			if ( false !== $result ) {
+				$migrated[] = 'page_title -> post_title';
+			}
+		}
+
+		// visited_at -> visit_timestamp
+		if ( in_array( 'visited_at', $columns, true ) && ! in_array( 'visit_timestamp', $columns, true ) ) {
+			$result = $wpdb->query( "ALTER TABLE {$table} CHANGE COLUMN visited_at visit_timestamp datetime NOT NULL" );
+			if ( false !== $result ) {
+				$migrated[] = 'visited_at -> visit_timestamp';
+			}
+		}
+
+		// cache_hit (tinyint) -> cache_status (varchar) with data conversion
+		if ( in_array( 'cache_hit', $columns, true ) && ! in_array( 'cache_status', $columns, true ) ) {
+			// Add new column first.
+			$result = $wpdb->query( "ALTER TABLE {$table} ADD COLUMN cache_status varchar(20) NOT NULL DEFAULT 'MISS'" );
+			if ( false !== $result ) {
+				// Migrate data: 1 -> HIT, 0 -> MISS.
+				$wpdb->query( "UPDATE {$table} SET cache_status = CASE WHEN cache_hit = 1 THEN 'HIT' ELSE 'MISS' END" );
+				$migrated[] = 'cache_hit -> cache_status (converted)';
+			}
+		}
+
+		// status_code -> keep as-is but ensure http_status also exists
+		// (http_status is added by add_missing_columns)
+
+		// Refresh columns list after renames.
+		$columns = $wpdb->get_col( "SHOW COLUMNS FROM {$table}" );
+
+		// --- Add completely new columns ---
+		$new_columns = array(
+			'post_id'                  => "ALTER TABLE {$table} ADD COLUMN post_id bigint(20) unsigned DEFAULT NULL AFTER url",
+			'post_type'                => "ALTER TABLE {$table} ADD COLUMN post_type varchar(50) DEFAULT NULL AFTER post_id",
+			'country_code'             => "ALTER TABLE {$table} ADD COLUMN country_code varchar(2) DEFAULT NULL AFTER ip_address",
+			'ai_platform'              => "ALTER TABLE {$table} ADD COLUMN ai_platform varchar(50) DEFAULT NULL AFTER search_query",
+			'referer_source'           => "ALTER TABLE {$table} ADD COLUMN referer_source varchar(100) DEFAULT NULL AFTER referer",
+			'referer_medium'           => "ALTER TABLE {$table} ADD COLUMN referer_medium varchar(50) DEFAULT NULL AFTER referer_source",
+			'detection_method'         => "ALTER TABLE {$table} ADD COLUMN detection_method varchar(50) DEFAULT 'legacy' AFTER referer_medium",
+			'confidence_score'         => "ALTER TABLE {$table} ADD COLUMN confidence_score decimal(3,2) DEFAULT NULL AFTER detection_method",
+			'ip_verified'              => "ALTER TABLE {$table} ADD COLUMN ip_verified tinyint(1) DEFAULT NULL AFTER confidence_score",
+			'ip_verification_method'   => "ALTER TABLE {$table} ADD COLUMN ip_verification_method varchar(50) DEFAULT NULL AFTER ip_verified",
+			'content_word_count'       => "ALTER TABLE {$table} ADD COLUMN content_word_count int(11) DEFAULT NULL",
+			'content_heading_count'    => "ALTER TABLE {$table} ADD COLUMN content_heading_count int(11) DEFAULT NULL",
+			'content_image_count'      => "ALTER TABLE {$table} ADD COLUMN content_image_count int(11) DEFAULT NULL",
+			'content_has_schema'       => "ALTER TABLE {$table} ADD COLUMN content_has_schema tinyint(1) DEFAULT 0",
+			'content_freshness_days'   => "ALTER TABLE {$table} ADD COLUMN content_freshness_days int(11) DEFAULT NULL",
+		);
+
+		foreach ( $new_columns as $col_name => $sql ) {
+			if ( ! in_array( $col_name, $columns, true ) ) {
+				$result = $wpdb->query( $sql );
+				if ( false !== $result ) {
+					$migrated[] = "added {$col_name}";
+					if ( $this->logger ) {
+						$this->logger->info( "Legacy migration: added column {$col_name}" );
+					}
+				} else {
+					if ( $this->logger ) {
+						$this->logger->error( "Legacy migration: failed to add {$col_name}", array( 'error' => $wpdb->last_error ) );
+					}
+				}
+			}
+		}
+
+		if ( ! empty( $migrated ) && $this->logger ) {
+			$this->logger->info( 'Legacy schema migration completed', array( 'changes' => $migrated ) );
+		}
+
+		return $migrated;
 	}
 
 	/**
@@ -122,7 +233,7 @@ class TA_Database_Auto_Fixer {
 			post_id bigint(20) unsigned DEFAULT NULL,
 			post_type varchar(50) DEFAULT NULL,
 			post_title text DEFAULT NULL,
-			request_method varchar(20) NOT NULL DEFAULT 'md_url',
+			request_method varchar(50) NOT NULL DEFAULT 'md_url',
 			request_type varchar(20) DEFAULT 'unknown',
 			cache_status varchar(20) NOT NULL DEFAULT 'MISS',
 			response_time int(11) DEFAULT NULL,
@@ -132,7 +243,7 @@ class TA_Database_Auto_Fixer {
 			referer text DEFAULT NULL,
 			country_code varchar(2) DEFAULT NULL,
 			traffic_type varchar(20) DEFAULT 'bot_crawl',
-			content_type varchar(20) DEFAULT 'html',
+			content_type varchar(50) DEFAULT 'html',
 			ai_platform varchar(50) DEFAULT NULL,
 			search_query text DEFAULT NULL,
 			referer_source varchar(100) DEFAULT NULL,
@@ -285,9 +396,9 @@ class TA_Database_Auto_Fixer {
 		// before columns that use AFTER <prerequisite> clauses, otherwise the ALTER
 		// TABLE fails with "Unknown column" on upgrades from older schema versions.
 		$required_columns = array(
-			'content_type'      => "ALTER TABLE {$table} ADD COLUMN content_type varchar(20) DEFAULT 'html' AFTER traffic_type",
+			'content_type'      => "ALTER TABLE {$table} ADD COLUMN content_type varchar(50) DEFAULT 'html' AFTER traffic_type",
 			'client_user_agent' => "ALTER TABLE {$table} ADD COLUMN client_user_agent text DEFAULT NULL AFTER user_agent",
-			'request_method'    => "ALTER TABLE {$table} ADD COLUMN request_method varchar(20) NOT NULL DEFAULT 'md_url' AFTER content_type",
+			'request_method'    => "ALTER TABLE {$table} ADD COLUMN request_method varchar(50) NOT NULL DEFAULT 'md_url' AFTER content_type",
 			'request_type'      => "ALTER TABLE {$table} ADD COLUMN request_type varchar(20) DEFAULT 'unknown' AFTER request_method",
 			'response_size'     => "ALTER TABLE {$table} ADD COLUMN response_size int(11) DEFAULT NULL AFTER response_time",
 			'http_status'       => "ALTER TABLE {$table} ADD COLUMN http_status int(3) DEFAULT NULL AFTER response_size",
@@ -484,7 +595,7 @@ class TA_Database_Auto_Fixer {
 		$sql .= "-- 6. Add LLM Traffic tracking columns (v3.5.0)\n";
 		$sql .= "ALTER TABLE {$table} ADD COLUMN client_user_agent text DEFAULT NULL AFTER user_agent;\n";
 		$sql .= "-- Add prerequisite columns before dependent ones\n";
-		$sql .= "ALTER TABLE {$table} ADD COLUMN request_method varchar(20) NOT NULL DEFAULT 'md_url' AFTER content_type;\n";
+		$sql .= "ALTER TABLE {$table} ADD COLUMN request_method varchar(50) NOT NULL DEFAULT 'md_url' AFTER content_type;\n";
 		$sql .= "ALTER TABLE {$table} ADD COLUMN request_type varchar(20) DEFAULT 'unknown' AFTER request_method;\n";
 		$sql .= "ALTER TABLE {$table} ADD COLUMN response_size int(11) DEFAULT NULL AFTER response_time;\n";
 		$sql .= "ALTER TABLE {$table} ADD COLUMN http_status int(3) DEFAULT NULL AFTER response_size;\n";
